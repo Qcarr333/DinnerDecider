@@ -1,0 +1,12 @@
+﻿@import "tailwindcss";
+
+:root {
+  --background: #0b1020;
+  --foreground: #f7fafc;
+}
+
+body {
+  background: linear-gradient(135deg, #14b8a6, #0ea5e9 50%, #fb7185);
+  min-height: 100svh;
+  color: var(--foreground);
+}
