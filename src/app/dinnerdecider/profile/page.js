@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useDinner } from "@/context/DinnerContext";
 import { FOOD_TYPES } from "@/data/foodTypes";
 import { track } from "@/lib/track";
+import Image from "next/image";
 
 export default function ProfilePage() {
   const { savedRestaurants, user, setUser } = useDinner();
@@ -128,7 +129,14 @@ export default function ProfilePage() {
             <div className="grid gap-3">
               {savedRestaurants.map((r, idx) => (
                 <div key={`${r.name}-${idx}`} className="rounded-xl bg-white shadow p-4 flex items-start gap-3">
-                  <img src={r.photo} alt={r.name} className="w-16 h-16 object-cover rounded-lg" />
+                  <Image
+                    src={r.photo || "/placeholder.jpg"}
+                    alt={r.name}
+                    width={64}
+                    height={64}
+                    className="w-16 h-16 object-cover rounded-lg"
+                    unoptimized
+                  />
                   <div className="flex-1">
                     <div className="font-semibold text-gray-900">{r.name}</div>
                     <div className="text-sm text-yellow-700">⭐ {r.rating}</div>

@@ -20,6 +20,7 @@ function pickWeighted(items) {
 }
 
 export async function suggestSmart(filters, savedRestaurants, opts = {}) {
+  const { mood = "any", weather = null, prefs = {}, timeCategory = null } = opts || {};
   // Signals
   const weights = (typeof window !== "undefined") ? safeParseLocal("dd_feedback_weights", { region: {}, specialized: {} }) : { region: {}, specialized: {} };
   const rerollHistory = (typeof window !== "undefined") ? safeParseLocal("dd_reroll_history", []) : [];
@@ -68,6 +69,108 @@ export async function suggestSmart(filters, savedRestaurants, opts = {}) {
   if (tod === "late") expCandidates.forEach((x) => { x.w += (x.v === "takeout" ? 0.6 : 0); });
 
   const specCandidates = specWeights.map((x) => ({ ...x }));
+  const idToLabel = new Map([
+    ...FOOD_TYPES.region.map((x) => [x.id, x.label]),
+    ...FOOD_TYPES.experience.map((x) => [x.id, x.label]),
+    ...FOOD_TYPES.specialized.map((x) => [x.id, x.label]),
+    ...FOOD_TYPES.distance.map((x) => [x.id, x.label]),
+  ]);
+
+  const moodSpecializedBoosts = new Map([
+    ["comfort", [["ramen", 1.2], ["noodles", 1.1], ["pasta", 1.1], ["soup", 1.1]]],
+    ["adventurous", [["fusion", 1.3], ["chef_special", 1.2], ["korean", 1.1]]],
+    ["healthy", [["salad", 1.3], ["vegetarian", 1.2], ["poke", 1.2], ["mediterranean", 1.1]]],
+    ["fast", [["street_food", 1.2], ["tacos", 1.1], ["burgers", 1.05]]],
+    ["celebration", [["steakhouse", 1.3], ["seafood", 1.25], ["wine_bar", 1.1]]],
+  ]);
+
+  const weatherSpecializedBoosts = new Map([
+    ["cold", [["ramen", 1.3], ["hot_pot", 1.2], ["pho", 1.2], ["bbq", 1.1]]],
+    ["rain", [["soup", 1.3], ["comfort", 1.2]]],
+    ["hot", [["ice_cream", 1.4], ["salad", 1.2], ["smoothies", 1.2]]],
+    ["humid", [["smoothies", 1.3], ["poke", 1.2]]],
+  ]);
+
+  const applyLabelBoosts = (candidates, boosts) => {
+    if (!boosts) return;
+    for (const [labelKey, weight] of boosts) {
+      candidates.forEach((cand) => {
+        const label = idToLabel.get(cand.v)?.toLowerCase() || "";
+        if (label.includes(labelKey.replace(/_/g, " "))) {
+          cand.w = (cand.w || 1) * weight;
+        }
+      });
+    }
+  };
+
+  applyLabelBoosts(specCandidates, moodSpecializedBoosts.get(mood));
+  if (weather?.bucket) applyLabelBoosts(specCandidates, weatherSpecializedBoosts.get(weather.bucket));
+
+  const timeCategoryBoosts = {
+    "Early Riser": {
+      experience: [["cafe", 1.3], ["takeout", 1.1]],
+      specialized: [["coffee", 1.5], ["smoothies", 1.3], ["sandwich", 1.15]],
+    },
+    Breakfast: {
+      experience: [["cafe", 1.25]],
+      specialized: [["coffee", 1.4], ["dessert", 1.1], ["smoothies", 1.15]],
+    },
+    Lunch: {
+      experience: [["casual", 1.15], ["takeout", 1.2]],
+      specialized: [["sandwich", 1.3], ["salad", 1.25], ["pizza", 1.1]],
+    },
+    Snack: {
+      experience: [["dessert_bar", 1.3], ["cafe", 1.2]],
+      specialized: [["dessert", 1.4], ["coffee", 1.2], ["smoothies", 1.35]],
+    },
+    Dinner: {
+      experience: [["fine", 1.2], ["casual", 1.1]],
+      specialized: [["steak", 1.35], ["seafood", 1.3], ["bbq", 1.15]],
+    },
+    Brunch: {
+      experience: [["brunch", 1.6], ["cafe", 1.25]],
+      specialized: [["coffee", 1.2], ["smoothies", 1.2], ["salad", 1.15]],
+    },
+    "Late Night": {
+      experience: [["pub", 1.3], ["takeout", 1.25]],
+      specialized: [["noodles", 1.3], ["wings", 1.4], ["burger", 1.2], ["bbq", 1.15]],
+    },
+  };
+
+  const applyTimeBoosts = (candidates, boosts) => {
+    if (!boosts) return;
+    for (const [id, weight] of boosts) {
+      candidates.forEach((cand) => {
+        if (cand.v === id) {
+          cand.w = (cand.w || 1) * weight;
+        }
+      });
+    }
+  };
+
+  if (timeCategory && timeCategoryBoosts[timeCategory]) {
+    applyTimeBoosts(expCandidates, timeCategoryBoosts[timeCategory]?.experience);
+    applyTimeBoosts(specCandidates, timeCategoryBoosts[timeCategory]?.specialized);
+  }
+
+  const likes = Array.isArray(prefs?.likes) ? prefs.likes : [];
+  const dislikes = Array.isArray(prefs?.dislikes) ? prefs.dislikes : [];
+  if (likes.length) {
+    specCandidates.forEach((cand) => {
+      const label = (idToLabel.get(cand.v) || "").toLowerCase();
+      if (likes.some((like) => label.includes(String(like).toLowerCase()))) {
+        cand.w = (cand.w || 1) * 1.3;
+      }
+    });
+  }
+  if (dislikes.length) {
+    specCandidates.forEach((cand) => {
+      const label = (idToLabel.get(cand.v) || "").toLowerCase();
+      if (dislikes.some((d) => label.includes(String(d).toLowerCase()))) {
+        cand.w = Math.max((cand.w || 1) * 0.4, 0.1);
+      }
+    });
+  }
   if (tod === "morning") specCandidates.forEach((x) => { x.w += specBoostMorning.get(x.v) || 0; });
   if (tod === "late") specCandidates.forEach((x) => { x.w += specBoostNight.get(x.v) || 0; });
 
@@ -87,13 +190,6 @@ export async function suggestSmart(filters, savedRestaurants, opts = {}) {
     + (hints.has(specialized) ? 0.1 : 0)
     + (tod === "morning" || tod === "late" ? 0.05 : 0);
 
-  const idToLabel = new Map([
-    ...FOOD_TYPES.region.map((x) => [x.id, x.label]),
-    ...FOOD_TYPES.experience.map((x) => [x.id, x.label]),
-    ...FOOD_TYPES.specialized.map((x) => [x.id, x.label]),
-    ...FOOD_TYPES.distance.map((x) => [x.id, x.label]),
-  ]);
-
   const combo = { region, experience, specialized, distance };
   const labeled = {
     Region: idToLabel.get(region),
@@ -102,7 +198,7 @@ export async function suggestSmart(filters, savedRestaurants, opts = {}) {
     Location: idToLabel.get(distance),
   };
 
-  try { console.log("🤖 AI Suggested Combo:", labeled, "confidence:", Number(conf.toFixed(2))); } catch {}
+  try { console.log("🤖 AI Suggested Combo:", labeled, "confidence:", Number(conf.toFixed(2)), "time:", timeCategory); } catch {}
   return { combo, labels: labeled, confidence: Number(conf.toFixed(2)) };
 }
 

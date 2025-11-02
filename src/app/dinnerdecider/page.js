@@ -1,33 +1,82 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import FiltersGrid from "@/components/FiltersGrid";
+import MoodSelector from "@/components/MoodSelector";
 import { useDinner } from "@/context/DinnerContext";
 import { track } from "@/lib/track";
 import { FOOD_TYPES } from "@/data/foodTypes";
 import { suggestSmart } from "@/lib/aiRecommender";
 import { motion, AnimatePresence } from "framer-motion";
 
+const LAYERS = ["region", "experience", "specialized", "distance"];
+
+function toPending(filters) {
+  const next = {};
+  LAYERS.forEach((layer) => {
+    const row = filters?.[layer];
+    if (row && typeof row === "object") {
+      const mode = row.mode === "custom" ? "custom" : "any";
+      const selected = row.selected instanceof Set ? Array.from(row.selected) : Array.isArray(row.selected) ? row.selected : [];
+      next[layer] = { mode, selected };
+    } else {
+      next[layer] = { mode: "any", selected: [] };
+    }
+  });
+  return next;
+}
+
+function toContextFilters(pending) {
+  const payload = {};
+  LAYERS.forEach((layer) => {
+    const row = pending?.[layer] || { mode: "any", selected: [] };
+    const mode = row.mode === "custom" ? "custom" : "any";
+    const selected = Array.isArray(row.selected) ? row.selected : [];
+    payload[layer] = {
+      mode,
+      selected: new Set(mode === "custom" ? selected : []),
+    };
+  });
+  return payload;
+}
+
 export default function Dashboard() {
   const router = useRouter();
-  const { filters, setFilters, setLocation, user } = useDinner();
+  const {
+    filters,
+    setFilters,
+    setLocation,
+    user,
+    mood,
+    setMood,
+    ensureWeather,
+    weather,
+    preferences,
+    refreshPreferences,
+    timeCategory,
+  } = useDinner();
   const [locStatus, setLocStatus] = useState("detect"); // detect | ok | fail
-  const allDefaults = {
-    region: FOOD_TYPES.region.map((x) => x.id),
-    experience: FOOD_TYPES.experience.map((x) => x.id),
-    specialized: FOOD_TYPES.specialized.map((x) => x.id),
-    distance: FOOD_TYPES.distance.map((x) => x.id),
-  };
-  const [pending, setPending] = useState(() => ({
-    region: Array.from(filters.region?.size ? filters.region : new Set(allDefaults.region)),
-    experience: Array.from(filters.experience?.size ? filters.experience : new Set(allDefaults.experience)),
-    specialized: Array.from(filters.specialized?.size ? filters.specialized : new Set(allDefaults.specialized)),
-    distance: Array.from(filters.distance?.size ? filters.distance : new Set(allDefaults.distance)),
-  }));
+  const [pending, setPending] = useState(() => toPending(filters));
+  const [hydrated, setHydrated] = useState(false);
 
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
+  const [suggestionInsight, setSuggestionInsight] = useState("");
+  const weatherSummary = useMemo(() => {
+    if (!weather) return null;
+    const temp = typeof weather.temperatureF === "number" ? `${Math.round(weather.temperatureF)}°F` : null;
+    const condition = weather.condition ? weather.condition : null;
+    return [temp, condition].filter(Boolean).join(" • ");
+  }, [weather]);
+
+  useEffect(() => {
+    setPending(toPending(filters));
+  }, [filters]);
+
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
 
   // Prompt geolocation on mount
   useEffect(() => {
@@ -39,6 +88,7 @@ export default function Dashboard() {
           if (!active) return;
           setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
           setLocStatus("ok");
+          ensureWeather(pos.coords.latitude, pos.coords.longitude);
         },
         () => {
           if (!active) return;
@@ -50,7 +100,11 @@ export default function Dashboard() {
       setLocStatus("fail");
     }
     return () => { active = false; };
-  }, [setLocation]);
+  }, [setLocation, ensureWeather]);
+
+  useEffect(() => {
+    if (user?.id) refreshPreferences(user.id);
+  }, [user?.id, refreshPreferences]);
 
   const handleLetsEat = () => {
     try { track("lets_eat_clicked"); } catch {}
@@ -59,25 +113,41 @@ export default function Dashboard() {
       arr.push(Date.now());
       localStorage.setItem("dd_decision_times", JSON.stringify(arr.slice(-200)));
     } catch {}
-    setFilters({
-      region: new Set(pending.region),
-      experience: new Set(pending.experience),
-      specialized: new Set(pending.specialized),
-      distance: new Set(pending.distance),
-    });
+    setFilters(toContextFilters(pending));
     router.push("/dinnerdecider/fetch");
   };
 
   const handleSmartSuggest = async () => {
     try { track("ai_suggestion_clicked"); } catch {}
-    const savedRaw = localStorage.getItem("dd_saved_restaurants");
-    const saved = savedRaw ? JSON.parse(savedRaw) : [];
-    const sugg = await suggestSmart({
-      specialized: new Set(pending.specialized),
-      region: new Set(pending.region),
-    }, saved);
-    setSuggestions(sugg);
     setSuggestOpen(true);
+  setSuggestionInsight("");
+    try {
+      const res = await fetch("/api/openai/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ filters: pending, mood, weather, prefs: preferences, timeCategory }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.suggestions) && data.suggestions.length) {
+          setSuggestions(data.suggestions);
+          setSuggestionInsight(typeof data?.insight === "string" ? data.insight : "");
+          try { track("ai_suggestion_generated", { source: data?.source || "openai_route", suggestions: data.suggestions.length }); } catch {}
+          return;
+        }
+      }
+      throw new Error("openai_fallback");
+    } catch (err) {
+      const savedRaw = localStorage.getItem("dd_saved_restaurants");
+      const saved = savedRaw ? JSON.parse(savedRaw) : [];
+      const sugg = await suggestSmart({
+        specialized: new Set(pending.specialized),
+        region: new Set(pending.region),
+      }, saved, { mood, weather, prefs: preferences, timeCategory });
+      setSuggestions(Object.values(sugg?.labels || {}));
+      setSuggestionInsight("Local AI blend based on your mood, weather, and time context.");
+      try { track("ai_suggestion_generated", { source: "local_fallback", suggestions: Object.values(sugg?.labels || {}).length }); } catch {}
+    }
   };
 
   return (
@@ -95,6 +165,9 @@ export default function Dashboard() {
           {locStatus === "fail" && (
             <p className="text-white/80 text-sm mt-1">Using default location. Enable location services for better results.</p>
           )}
+          {hydrated && weatherSummary ? (
+            <p className="text-white/80 text-sm mt-1">Weather tuned: {weatherSummary}</p>
+          ) : null}
         </header>
 
         <div className="rounded-3xl bg-white/10 backdrop-blur-md shadow-xl p-5 md:p-8">
@@ -102,6 +175,8 @@ export default function Dashboard() {
             <h2 className="text-white text-lg font-semibold">Choose what you’re craving</h2>
             <p className="text-white/80 text-sm">Grouped by Region, Experience, Specialized, and Location.</p>
           </div>
+
+          <MoodSelector value={mood} onChange={setMood} />
 
           <FiltersGrid
             initial={pending}
@@ -153,6 +228,7 @@ export default function Dashboard() {
                   </motion.li>
                 ))}
               </ul>
+              {suggestionInsight ? <p className="mt-3 text-sm text-gray-600">{suggestionInsight}</p> : null}
               <div className="mt-4 text-right">
                 <button className="rounded-lg px-4 py-1.5 bg-teal-600 text-white" onClick={() => setSuggestOpen(false)}>Close</button>
               </div>

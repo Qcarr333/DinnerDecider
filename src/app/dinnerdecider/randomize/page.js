@@ -16,18 +16,45 @@ function pickRandom(arr) {
 
 export default function RandomizePage() {
   const router = useRouter();
-  const { filters, restaurantsCache, setSelectedCombo, r1Rerolls, setR1Rerolls, user, setRestaurantsCache, location } = useDinner();
+  const {
+    filters,
+    restaurantsCache,
+    setSelectedCombo,
+    r1Rerolls,
+    setR1Rerolls,
+    user,
+    setRestaurantsCache,
+    location,
+    mood,
+    weather,
+    preferences,
+    setR2Seed,
+    timeCategory,
+  } = useDinner();
   const [combo, setCombo] = useState(null);
 
-  const pool = useMemo(() => {
-    const asArray = (s) => Array.from(s || []);
+  const layerOptions = useMemo(() => {
+    const build = (layerKey) => {
+      const data = filters?.[layerKey];
+      const totalIds = FOOD_TYPES[layerKey].map((x) => x.id);
+      const selected = data?.selected instanceof Set ? Array.from(data.selected) : [];
+      const isCustom = data?.mode === "custom" && selected.length > 0 && selected.length < totalIds.length;
+      return {
+        ids: isCustom ? selected : totalIds,
+        isWildcard: !isCustom,
+      };
+    };
     return {
-      region: asArray(filters.region).length ? asArray(filters.region) : FOOD_TYPES.region.map((x) => x.id),
-      experience: asArray(filters.experience).length ? asArray(filters.experience) : FOOD_TYPES.experience.map((x) => x.id),
-      specialized: asArray(filters.specialized).length ? asArray(filters.specialized) : FOOD_TYPES.specialized.map((x) => x.id),
-      distance: asArray(filters.distance).length ? asArray(filters.distance) : FOOD_TYPES.distance.map((x) => x.id),
+      region: build("region"),
+      experience: build("experience"),
+      specialized: build("specialized"),
+      distance: build("distance"),
     };
   }, [filters]);
+
+  const dontCareLayers = useMemo(() => {
+    return Object.values(layerOptions).reduce((count, entry) => (entry.isWildcard ? count + 1 : count), 0);
+  }, [layerOptions]);
 
   const idToLabel = useMemo(() => {
     const m = new Map();
@@ -37,15 +64,43 @@ export default function RandomizePage() {
     return m;
   }, []);
 
+  const labelFor = (id) => {
+    if (!id) return "Any";
+    return idToLabel.get(id) || "Any";
+  };
+
   const reroll = () => {
     if (!user?.premium && r1Rerolls >= 3) return;
     setR1Rerolls((n) => n + 1);
-    const c = {
-      region: pickRandom(pool.region),
-      experience: pickRandom(pool.experience),
-      specialized: pickRandom(pool.specialized),
-      distance: pickRandom(pool.distance),
+    const chooseValue = (layerKey) => {
+      const entry = layerOptions[layerKey];
+      if (!entry || entry.isWildcard) return null;
+      return pickRandom(entry.ids);
     };
+    const makeCombo = () => ({
+      region: chooseValue("region"),
+      experience: chooseValue("experience"),
+      specialized: chooseValue("specialized"),
+      distance: chooseValue("distance"),
+    });
+    let nextCombo = makeCombo();
+    if (dontCareLayers >= 2) {
+      try {
+        const raw = localStorage.getItem("dd_last_any_combo");
+        const prev = raw ? JSON.parse(raw) : null;
+        let attempts = 0;
+        while (prev && isSameCombo(prev, nextCombo) && attempts < 5) {
+          nextCombo = makeCombo();
+          attempts += 1;
+        }
+        localStorage.setItem("dd_last_any_combo", JSON.stringify(nextCombo));
+        const seed = Date.now();
+        setR2Seed(seed);
+        try { track("r2_randomized_after_any_layers", { seed, layers: dontCareLayers }); } catch {}
+      } catch {}
+    } else {
+      setR2Seed(null);
+    }
     try {
       // record rejected previous combo for learning
       if (combo) {
@@ -54,8 +109,8 @@ export default function RandomizePage() {
         localStorage.setItem("dd_reroll_history", JSON.stringify(arr.slice(-100)));
       }
     } catch {}
-    setCombo(c);
-    try { console.log("🌀 R1 Combo Generated:", c); } catch {}
+    setCombo(nextCombo);
+    try { console.log("🌀 R1 Combo Generated:", nextCombo); } catch {}
   };
 
   useEffect(() => {
@@ -79,16 +134,22 @@ export default function RandomizePage() {
     try {
       const saved = JSON.parse(localStorage.getItem("dd_saved_restaurants") || "[]");
       const smart = await suggestSmart({
-        region: new Set(pool.region),
-        experience: new Set(pool.experience),
-        specialized: new Set(pool.specialized),
-        distance: new Set(pool.distance),
-      }, saved);
+        region: new Set(layerOptions.region.ids),
+        experience: new Set(layerOptions.experience.ids),
+        specialized: new Set(layerOptions.specialized.ids),
+        distance: new Set(layerOptions.distance.ids),
+      }, saved, { mood, weather, prefs: preferences, timeCategory });
       const rec = smart.combo;
       setSelectedCombo(rec);
       const lat = location?.lat ?? 30.3322;
       const lng = location?.lng ?? -81.6557;
-      const data = await fetchNearbyRestaurants(lat, lng, filters, rec);
+      const data = await fetchNearbyRestaurants(lat, lng, filters, rec, {
+        mood,
+        weather,
+        prefs: preferences,
+        timeCategory,
+        weatherHint: weather?.weatherHint,
+      });
       setRestaurantsCache(Array.isArray(data) ? data : []);
       router.replace("/dinnerdecider/output");
     } catch (e) {
@@ -120,19 +181,19 @@ export default function RandomizePage() {
             <div className="grid grid-cols-1 gap-3">
               <div className="rounded-xl border border-teal-100 bg-teal-50/60 p-3">
                 <div className="text-xs uppercase tracking-wide text-teal-700 font-semibold">{LAYER_LABELS.region}</div>
-                <div className="text-lg">{idToLabel.get(combo.region)}</div>
+                <div className="text-lg">{labelFor(combo.region)}</div>
               </div>
               <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
                 <div className="text-xs uppercase tracking-wide text-indigo-700 font-semibold">{LAYER_LABELS.experience}</div>
-                <div className="text-lg">{idToLabel.get(combo.experience)}</div>
+                <div className="text-lg">{labelFor(combo.experience)}</div>
               </div>
               <div className="rounded-xl border border-rose-100 bg-rose-50/60 p-3">
                 <div className="text-xs uppercase tracking-wide text-rose-700 font-semibold">{LAYER_LABELS.specialized}</div>
-                <div className="text-lg font-medium">{idToLabel.get(combo.specialized)}</div>
+                <div className="text-lg font-medium">{labelFor(combo.specialized)}</div>
               </div>
               <div className="rounded-xl border border-amber-100 bg-amber-50/60 p-3">
                 <div className="text-xs uppercase tracking-wide text-amber-700 font-semibold">{LAYER_LABELS.distance}</div>
-                <div className="text-lg">{idToLabel.get(combo.distance)}</div>
+                <div className="text-lg">{labelFor(combo.distance)}</div>
               </div>
             </div>
           </motion.div>
@@ -148,4 +209,9 @@ export default function RandomizePage() {
       </div>
     </main>
   );
+}
+
+function isSameCombo(a, b) {
+  if (!a || !b) return false;
+  return a.region === b.region && a.experience === b.experience && a.specialized === b.specialized && a.distance === b.distance;
 }

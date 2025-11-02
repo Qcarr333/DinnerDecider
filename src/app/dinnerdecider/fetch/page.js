@@ -6,11 +6,12 @@ import { motion } from "framer-motion";
 import { useDinner } from "@/context/DinnerContext";
 import { fetchNearbyRestaurants } from "@/lib/fetchNearbyRestaurants";
 
+const SANDWICH_STATES = ["🥪", "🥪", "🥪", "🥪", "🍞", "🍞", ""];
+
 export default function FetchScreen() {
   const router = useRouter();
-  const { filters, setRestaurantsCache, location } = useDinner();
+  const { filters, setRestaurantsCache, location, mood, weather, preferences, timeCategory } = useDinner();
   const [done, setDone] = useState(false);
-  const sandwichStates = ["🥪", "🥪", "🥪", "🥪", "🍞", "🍞", ""];
   const [idx, setIdx] = useState(0);
 
   useEffect(() => {
@@ -19,7 +20,13 @@ export default function FetchScreen() {
       const lat = location?.lat ?? 30.3322;
       const lng = location?.lng ?? -81.6557;
       try {
-        const results = await fetchNearbyRestaurants(lat, lng, filters);
+      const results = await fetchNearbyRestaurants(lat, lng, filters, null, {
+        mood,
+        weather,
+        prefs: preferences,
+        timeCategory,
+        weatherHint: weather?.weatherHint,
+      });
         if (cancelled) return;
         setRestaurantsCache(results || []);
         setDone(true);
@@ -36,10 +43,10 @@ export default function FetchScreen() {
     return () => {
       cancelled = true;
     };
-  }, [filters, router, setRestaurantsCache, location]);
+  }, [filters, router, setRestaurantsCache, location, mood, weather, preferences, timeCategory]);
 
   useEffect(() => {
-    const timer = setInterval(() => setIdx((p) => (p + 1) % sandwichStates.length), 500);
+    const timer = setInterval(() => setIdx((p) => (p + 1) % SANDWICH_STATES.length), 500);
     return () => clearInterval(timer);
   }, []);
 
@@ -52,7 +59,7 @@ export default function FetchScreen() {
         transition={{ duration: 0.4 }}
         className="text-6xl"
       >
-        {sandwichStates[idx] || "🍽️"}
+  {SANDWICH_STATES[idx] || "🍽️"}
       </motion.div>
       <p className="text-xl font-medium mt-3">Searching for tasty spots near you…</p>
       <p className="text-sm mt-1 text-gray-500">{done ? "Done!" : "Loading…"}</p>

@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { useDinner } from "@/context/DinnerContext";
 import { track } from "@/lib/track";
+import Image from "next/image";
 
 function getSessionKey(code) {
   return `dd_group_${code}`;
@@ -49,7 +50,7 @@ export default function GroupSessionPage() {
     return session.restaurants.slice(start, start + 3);
   }, [session.restaurants, page]);
 
-  const handleVote = (name, delta) => {
+  const handleVote = useCallback((name, delta) => {
     setSession((prev) => {
       const votes = { ...(prev.votes || {}) };
       votes[name] = (votes[name] || 0) + delta;
@@ -57,9 +58,9 @@ export default function GroupSessionPage() {
       saveSession(code, next);
       return next;
     });
-  };
+  }, [code]);
 
-  const handleFinalize = () => {
+  const handleFinalize = useCallback(() => {
     try { track("group_finalize"); } catch {}
     const entries = Object.entries(session.votes || {});
     if (entries.length === 0) {
@@ -79,7 +80,7 @@ export default function GroupSessionPage() {
       }
     }
     setWinner(best?.item || null);
-  };
+  }, [session]);
 
   // Countdown timer logic (90s default)
   useEffect(() => {
@@ -93,7 +94,7 @@ export default function GroupSessionPage() {
     if (timeLeft === 0 && !winner) {
       handleFinalize();
     }
-  }, [timeLeft, winner]);
+  }, [timeLeft, winner, handleFinalize]);
 
   function formatTime(sec) {
     const m = Math.floor(sec / 60);
@@ -101,25 +102,25 @@ export default function GroupSessionPage() {
     return `${m}:${s.toString().padStart(2, "0")}`;
   }
 
-  const handleCopy = async () => {
+  const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
       alert("Link copied!");
     } catch {
       alert(window.location.href);
     }
-  };
+  }, []);
 
-  const handleInviteSMS = () => {
+  const handleInviteSMS = useCallback(() => {
     const body = encodeURIComponent(`Join our DinnerDecider group! Use this link: ${window.location.href}`);
     window.location.href = `sms:?body=${body}`;
-  };
+  }, []);
 
-  const handleInviteWhatsApp = () => {
+  const handleInviteWhatsApp = useCallback(() => {
     const link = encodeURIComponent(window.location.href);
     const url = `https://api.whatsapp.com/send?text=Join%20our%20DinnerDecider%20group!%20${link}`;
     window.open(url, "_blank", "noopener,noreferrer");
-  };
+  }, []);
 
   return (
     <main className="min-h-[100svh] bg-gradient-to-br from-teal-50 to-pink-50 px-4 pt-24 pb-12">
@@ -162,7 +163,15 @@ export default function GroupSessionPage() {
             <div className="grid gap-2">
               <div className="font-semibold">{winner.name}</div>
               <div className="text-yellow-600">⭐ {winner.rating}</div>
-              <img src={winner.photo} alt={winner.name} className="w-full h-44 object-cover rounded-xl" />
+              <Image
+                src={winner.photo || "/placeholder.jpg"}
+                alt={winner.name}
+                width={640}
+                height={264}
+                className="w-full h-44 object-cover rounded-xl"
+                unoptimized
+                priority
+              />
               <div className="text-gray-700">{winner.address}</div>
             </div>
           </div>
@@ -171,7 +180,14 @@ export default function GroupSessionPage() {
             <div className="grid md:grid-cols-3 gap-4">
               {currentSlice.map((r) => (
                 <div key={r.name} className="rounded-xl bg-white shadow p-4 flex flex-col">
-                  <img src={r.photo} alt={r.name} className="w-full h-32 object-cover rounded-lg mb-2" />
+                  <Image
+                    src={r.photo || "/placeholder.jpg"}
+                    alt={r.name}
+                    width={480}
+                    height={192}
+                    className="w-full h-32 object-cover rounded-lg mb-2"
+                    unoptimized
+                  />
                   <div className="font-semibold text-gray-900">{r.name}</div>
                   <div className="text-sm text-yellow-600">⭐ {r.rating}</div>
                   <div className="text-sm text-gray-600 line-clamp-2 mt-1">{r.address}</div>

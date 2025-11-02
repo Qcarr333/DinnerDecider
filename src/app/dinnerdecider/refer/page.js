@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect } from "react";
-import { useSearchParams } from "next/navigation";
 import { useDinner } from "@/context/DinnerContext";
 import { track } from "@/lib/track";
 import { applyPromoFromQuery } from "@/lib/referrals";
@@ -18,26 +17,29 @@ function ensureUserCode(user, setUser) {
 }
 
 export default function ReferPage() {
-  const params = useSearchParams();
   const { user, setUser } = useDinner();
   const code = ensureUserCode(user, setUser);
   const link = typeof window !== "undefined" ? `${window.location.origin}/dinnerdecider/refer?code=${code || ""}` : "";
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
     const extCode = params.get("code");
     if (extCode && (!user || user.code !== extCode)) {
       try { localStorage.setItem("dd_referral_pending", extCode); } catch {}
     }
-  }, [params, user]);
+  }, [user]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
     const p = applyPromoFromQuery(params);
     if (p) {
       track("promo_applied", { promo: p });
       console.log("🎁 Promo code detected → applied");
       alert(`Promo code ${p} applied successfully.`);
     }
-  }, [params]);
+  }, []);
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(link); alert("Link copied!"); } catch { alert(link); }
