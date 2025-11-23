@@ -22,8 +22,138 @@ function getLatestShortlist() {
 	}
 }
 
+function createEmptySession(code, restaurants) {
+	return {
+		groupCode: code,
+		votes: {},
+		ledger: {},
+		restaurants: Array.isArray(restaurants) ? restaurants : [],
+		version: 0,
+		lastUpdatedAt: Date.now(),
+		ownerParticipantId: null,
+		ownerDisplayName: null,
+		roundId: 0,
+	};
+}
+
+function getRestaurantKey(restaurant) {
+	if (!restaurant || typeof restaurant !== "object") return null;
+	const name = typeof restaurant.name === "string" ? restaurant.name.trim() : "";
+	const address = typeof restaurant.address === "string" ? restaurant.address.trim() : "";
+	const fallbackName = name && address ? `${name}|${address}` : name;
+	const coordinateFallback =
+		typeof restaurant.latitude === "number" && typeof restaurant.longitude === "number"
+			? `${name || "restaurant"}|${restaurant.latitude},${restaurant.longitude}`
+			: "";
+	const candidate =
+		restaurant.placeId ||
+		restaurant.place_id ||
+		restaurant.id ||
+		restaurant.slug ||
+		restaurant.reference ||
+		fallbackName ||
+		coordinateFallback;
+	if (candidate && typeof candidate === "string" && candidate.trim()) {
+		return candidate.trim();
+	}
+	try {
+		return JSON.stringify(restaurant);
+	} catch {
+		return name || null;
+	}
+}
+
+// Merge new shortlist entries into the current board while keeping existing items and order intact.
+function mergeRestaurantLists(existingList, incomingList) {
+	const base = Array.isArray(existingList) ? existingList : [];
+	const incoming = Array.isArray(incomingList) ? incomingList : [];
+	if (!base.length && !incoming.length) {
+		return { list: [], addedKeys: [], keys: [] };
+	}
+	const merged = [];
+	const keyToIndex = new Map();
+	const addedKeys = [];
+	const addRestaurant = (restaurant, isIncoming) => {
+		if (!restaurant || typeof restaurant !== "object") return;
+		const key = getRestaurantKey(restaurant);
+		if (!key) return;
+		if (keyToIndex.has(key)) {
+			const index = keyToIndex.get(key);
+			const current = merged[index];
+			merged[index] = isIncoming ? { ...current, ...restaurant } : { ...restaurant, ...current };
+			return;
+		}
+		keyToIndex.set(key, merged.length);
+		merged.push({ ...restaurant });
+		if (isIncoming) {
+			addedKeys.push(key);
+		}
+	};
+	base.forEach((restaurant) => addRestaurant(restaurant, false));
+	incoming.forEach((restaurant) => addRestaurant(restaurant, true));
+	return { list: merged, addedKeys, keys: merged.map((restaurant) => getRestaurantKey(restaurant)) };
+}
+
+function mergeLedgerSnapshots(currentLedger, incomingLedger, { reset } = { reset: false }) {
+	const result = {};
+	const seedSource = reset ? {} : currentLedger;
+	const applyEntries = (source) => {
+		if (!source || typeof source !== "object") return;
+		Object.entries(source).forEach(([key, entry]) => {
+			if (!key || !entry || typeof entry !== "object") return;
+			const contributors = entry.contributors && typeof entry.contributors === "object" ? entry.contributors : {};
+			if (!result[key]) {
+				result[key] = { contributors: {} };
+			}
+			Object.entries(contributors).forEach(([participant, detail]) => {
+				if (!participant) return;
+				const score = Number(detail?.score);
+				const version = Number(detail?.version) || 0;
+				const target = result[key].contributors;
+				const existing = target[participant];
+				if (!Number.isFinite(score) || score === 0) {
+					if (existing && version >= (existing.version || 0)) {
+						delete target[participant];
+					}
+					return;
+				}
+				const shouldReplace = reset || !existing || version >= (existing.version || 0);
+				if (shouldReplace) {
+					target[participant] = { score, version };
+				}
+			});
+		});
+	};
+	applyEntries(seedSource);
+	applyEntries(incomingLedger);
+	Object.entries(result).forEach(([key, entry]) => {
+		const contributors = entry.contributors;
+		const total = Object.values(contributors).reduce((sum, detail) => sum + (Number(detail?.score) || 0), 0);
+		if (total === 0) {
+			delete result[key];
+		} else {
+			entry.total = total;
+		}
+	});
+	return result;
+}
+
+function areShortlistsEqual(current, nextList) {
+	if (!Array.isArray(current) || !Array.isArray(nextList)) return false;
+	if (current.length !== nextList.length) return false;
+	for (let index = 0; index < current.length; index += 1) {
+		const existingKey = getRestaurantKey(current[index]);
+		const incomingKey = getRestaurantKey(nextList[index]);
+		if (!existingKey || !incomingKey || existingKey !== incomingKey) {
+			return false;
+		}
+	}
+	return true;
+}
+
 const PARTICIPANT_ID_PREFIX = "dd_group_participant_id";
 const DISPLAY_NAME_KEY = "dd_group_display_name";
+const DEFAULT_ROUND_DURATION_SECONDS = 300;
 
 function generateParticipantId() {
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -80,34 +210,120 @@ function persistParticipantName(name) {
 	} catch {}
 }
 
-function loadSession(code, restaurants) {
-	try {
-		const raw = localStorage.getItem(getSessionKey(code));
-		if (raw) return JSON.parse(raw);
-	} catch {}
-	return {
+function normalizeSessionSnapshot(snapshot, code, restaurants) {
+	const baseRestaurants = Array.isArray(restaurants) ? restaurants : [];
+	const incoming = snapshot && typeof snapshot === "object" ? { ...snapshot } : {};
+	const normalized = {
 		groupCode: code,
 		votes: {},
-		restaurants: Array.isArray(restaurants) ? restaurants : [],
-		version: 0,
-		lastUpdatedAt: Date.now(),
- 		ownerParticipantId: null,
- 		ownerDisplayName: null,
+		ledger: {},
+		restaurants: baseRestaurants,
+		version: typeof incoming.version === "number" && !Number.isNaN(incoming.version) ? incoming.version : 0,
+		lastUpdatedAt: typeof incoming.lastUpdatedAt === "number" ? incoming.lastUpdatedAt : Date.now(),
+		ownerParticipantId: incoming.ownerParticipantId || null,
+		ownerDisplayName: incoming.ownerDisplayName || null,
+		roundId: typeof incoming.roundId === "number" ? incoming.roundId : 0,
 	};
+	Object.assign(normalized, incoming);
+	if (!Array.isArray(normalized.restaurants)) {
+		normalized.restaurants = baseRestaurants;
+	}
+	if (!normalized.votes || typeof normalized.votes !== "object") {
+		normalized.votes = {};
+	}
+	if (!normalized.ledger || typeof normalized.ledger !== "object") {
+		normalized.ledger = {};
+	}
+	const deduped = mergeRestaurantLists([], normalized.restaurants);
+	normalized.restaurants = deduped.list;
+	const restaurantLookup = new Map();
+	normalized.restaurants.forEach((restaurant) => {
+		const key = getRestaurantKey(restaurant);
+		if (key) {
+			restaurantLookup.set(key, restaurant);
+		}
+		if (restaurant?.name) {
+			restaurantLookup.set(restaurant.name, restaurant);
+		}
+	});
+	const sanitizedLedger = {};
+	Object.entries(normalized.ledger || {}).forEach(([candidateKey, value]) => {
+		if (!candidateKey) return;
+		if (!value || typeof value !== "object") return;
+		const match = restaurantLookup.get(candidateKey);
+		if (!match) return;
+		const resolvedKey = getRestaurantKey(match) || candidateKey;
+		const sourceContributors = value.contributors && typeof value.contributors === "object" ? value.contributors : {};
+		const contributors = {};
+		Object.entries(sourceContributors).forEach(([participant, detail]) => {
+			if (!participant) return;
+			if (detail && typeof detail === "object") {
+				const score = Number(detail.score) || 0;
+				if (score !== 0) {
+					contributors[participant] = {
+						score,
+						version: Number(detail.version) || 0,
+					};
+				}
+			} else {
+				const numericScore = Number(detail) || 0;
+				if (numericScore !== 0) {
+					contributors[participant] = { score: numericScore, version: 0 };
+				}
+			}
+		});
+		const total = Object.values(contributors).reduce((sum, entry) => sum + (entry?.score || 0), 0);
+		if (total !== 0) {
+			sanitizedLedger[resolvedKey] = { total, contributors };
+		}
+	});
+	normalized.ledger = sanitizedLedger;
+	const filteredVotes = {};
+	Object.entries(normalized.votes || {}).forEach(([candidateKey, value]) => {
+		const match = restaurantLookup.get(candidateKey);
+		if (!match) return;
+		const resolvedKey = getRestaurantKey(match) || candidateKey;
+		const numericScore = Number(value) || 0;
+		if (numericScore !== 0) {
+			filteredVotes[resolvedKey] = numericScore;
+		}
+	});
+	Object.entries(sanitizedLedger).forEach(([key, entry]) => {
+		filteredVotes[key] = entry.total;
+	});
+	normalized.votes = filteredVotes;
+	if (typeof normalized.version !== "number" || Number.isNaN(normalized.version)) {
+		normalized.version = 0;
+	}
+	if (typeof normalized.lastUpdatedAt !== "number") {
+		normalized.lastUpdatedAt = Date.now();
+	}
+	if (typeof normalized.roundId !== "number") {
+		normalized.roundId = 0;
+	}
+	return normalized;
+}
+
+function loadSession(code, restaurants) {
+	const fallback = createEmptySession(code, restaurants);
+	if (typeof window === "undefined") return fallback;
+	try {
+		const raw = localStorage.getItem(getSessionKey(code));
+		if (raw) {
+			const parsed = JSON.parse(raw);
+			if (parsed && typeof parsed === "object") {
+				return normalizeSessionSnapshot(parsed, code, restaurants);
+			}
+		}
+	} catch {}
+	return fallback;
 }
 
 function saveSession(code, session) {
+	if (typeof window === "undefined") return;
 	try {
 		localStorage.setItem(getSessionKey(code), JSON.stringify(session));
 	} catch {}
-}
-
-function applyVotes(base, voteMap) {
-	const votes = { ...(base.votes || {}) };
-	Object.entries(voteMap || {}).forEach(([name, score]) => {
-		votes[name] = score;
-	});
-	return votes;
 }
 
 function formatTime(seconds) {
@@ -120,11 +336,12 @@ export default function GroupSessionPage() {
 	const { code } = useParams();
 	const { restaurantsCache, user } = useDinner();
 
-	const [session, setSession] = useState(() => loadSession(code, restaurantsCache));
+	const [session, setSession] = useState(() => createEmptySession(code, restaurantsCache));
 	const [page, setPage] = useState(0);
 	const [winner, setWinner] = useState(null);
-	const [timeLeft, setTimeLeft] = useState(90);
+	const [timeLeft, setTimeLeft] = useState(DEFAULT_ROUND_DURATION_SECONDS);
 	const [participants, setParticipants] = useState([]);
+	const [timerExpired, setTimerExpired] = useState(false);
 
 	const participantId = useMemo(() => ensureParticipantId(code), [code]);
 	const fallbackName = useMemo(() => (user?.name && user.name.trim()) || "Guest", [user?.name]);
@@ -136,10 +353,42 @@ export default function GroupSessionPage() {
 	const sessionRef = useRef(session);
 	const persistTimerRef = useRef(null);
 	const pendingPersistRef = useRef(null);
+	const autoFinalizeRef = useRef(false);
+	const lastRoundRef = useRef(typeof session.roundId === "number" ? session.roundId : 0);
+
+	const resetRound = useCallback(() => {
+		autoFinalizeRef.current = false;
+		setTimerExpired(false);
+		setTimeLeft(DEFAULT_ROUND_DURATION_SECONDS);
+	}, []);
 
 	useEffect(() => {
 		sessionRef.current = session;
 	}, [session]);
+
+	useEffect(() => {
+		if (!hydrated) return;
+		const stored = loadSession(code, restaurantsCache);
+		if (!stored) return;
+		const current = sessionRef.current || createEmptySession(code, restaurantsCache);
+		const hasDiff =
+			(stored.roundId ?? 0) !== (current.roundId ?? 0) ||
+			(stored.version ?? 0) !== (current.version ?? 0) ||
+			(stored.restaurants?.length || 0) !== (current.restaurants?.length || 0);
+		if (hasDiff) {
+			lastRoundRef.current = typeof stored.roundId === "number" ? stored.roundId : 0;
+			sessionRef.current = stored;
+			setSession(stored);
+		}
+	}, [code, hydrated, restaurantsCache]);
+
+	useEffect(() => {
+		const currentRound = typeof session.roundId === "number" ? session.roundId : 0;
+		if (currentRound !== lastRoundRef.current) {
+			lastRoundRef.current = currentRound;
+			resetRound();
+		}
+	}, [resetRound, session.roundId]);
 
 	useEffect(() => {
 		setHydrated(true);
@@ -233,6 +482,7 @@ export default function GroupSessionPage() {
 						lastUpdatedAt: Date.now(),
 						ownerParticipantId: current?.ownerParticipantId || participantId,
 						ownerDisplayName: current?.ownerDisplayName || displayName,
+						roundId: (current?.roundId || 0) + 1,
 					};
 					sessionRef.current = next;
 					setSession(next);
@@ -248,18 +498,68 @@ export default function GroupSessionPage() {
 				const applyShortlist = (list) => {
 					if (!Array.isArray(list) || list.length === 0) return;
 					const current = sessionRef.current;
-					const isOwner = !current?.ownerParticipantId || current.ownerParticipantId === participantId;
-					if (!isOwner) return;
+					const timestamp = Date.now();
+					const shortlistChanged = !areShortlistsEqual(current?.restaurants, list);
+					const currentOwner = current?.ownerParticipantId || null;
+					const canOverride =
+						!currentOwner ||
+						currentOwner === participantId ||
+						(current?.restaurants?.length || 0) === 0 ||
+						shortlistChanged ||
+						timestamp - (current?.lastUpdatedAt || 0) > 15_000;
+					if (!canOverride) return;
 					let updated = null;
 					setSession((prev) => {
+						const prevRestaurants = Array.isArray(prev.restaurants) ? prev.restaurants : [];
+						const { list: mergedRestaurants, addedKeys } = mergeRestaurantLists(prevRestaurants, list);
+						const hasNewEntries = addedKeys.length > 0;
+						const sameStructure =
+							mergedRestaurants.length === prevRestaurants.length &&
+							mergedRestaurants.every((restaurant, index) => {
+								const previous = prevRestaurants[index];
+								if (!previous) return false;
+								return getRestaurantKey(previous) === getRestaurantKey(restaurant);
+							});
+						if (!shortlistChanged && !hasNewEntries && sameStructure) {
+							return prev;
+						}
+						const votes = {};
+						mergedRestaurants.forEach((restaurant) => {
+							const key = getRestaurantKey(restaurant);
+							if (!key) return;
+							const existing =
+								prev.votes?.[key] ?? (restaurant?.name ? prev.votes?.[restaurant.name] : undefined);
+							const numeric = Number(existing) || 0;
+							if (numeric !== 0) {
+								votes[key] = numeric;
+							}
+						});
+						const ledger = {};
+						mergedRestaurants.forEach((restaurant) => {
+							const key = getRestaurantKey(restaurant);
+							if (!key) return;
+							const entry =
+								prev.ledger?.[key] || (restaurant?.name ? prev.ledger?.[restaurant.name] : undefined);
+							if (entry && typeof entry === "object") {
+								ledger[key] = entry;
+							}
+						});
+						const takingOwnership =
+							shortlistChanged && prev.ownerParticipantId && prev.ownerParticipantId !== participantId;
+						const nextOwner = takingOwnership || !prev.ownerParticipantId ? participantId : prev.ownerParticipantId;
+						const nextDisplayName =
+							takingOwnership || !prev.ownerDisplayName ? displayName : prev.ownerDisplayName || displayName;
+						const nextRoundId = hasNewEntries ? (prev.roundId || 0) + 1 : prev.roundId || 0;
 						const next = {
 							...prev,
-							restaurants: list,
-							votes: {},
+							restaurants: mergedRestaurants,
+							votes,
+							ledger,
 							version: (prev.version || 0) + 1,
-							lastUpdatedAt: Date.now(),
-							ownerParticipantId: prev.ownerParticipantId || participantId,
-							ownerDisplayName: prev.ownerDisplayName || displayName,
+							lastUpdatedAt: timestamp,
+							ownerParticipantId: nextOwner,
+							ownerDisplayName: nextDisplayName,
+							roundId: nextRoundId,
 						};
 						updated = next;
 						return next;
@@ -299,12 +599,21 @@ export default function GroupSessionPage() {
 	const voteSnapshot = useMemo(() => {
 		const votes = session.votes || {};
 		const items = Object.entries(votes)
-			.map(([name, score]) => ({
-				name,
-				score,
-				restaurant: session.restaurants.find((item) => item.name === name) || null,
-			}))
-			.filter((entry) => entry.restaurant);
+			.map(([key, score]) => {
+				let restaurant = session.restaurants.find((item) => getRestaurantKey(item) === key) || null;
+				if (!restaurant) {
+					restaurant = session.restaurants.find((item) => item.name === key) || null;
+				}
+				if (!restaurant) return null;
+				const resolvedKey = getRestaurantKey(restaurant) || key;
+				return {
+					key: resolvedKey,
+					name: restaurant.name,
+					score,
+					restaurant,
+				};
+			})
+			.filter(Boolean);
 		items.sort((a, b) => b.score - a.score);
 		return items.slice(0, 5);
 	}, [session.restaurants, session.votes]);
@@ -320,22 +629,16 @@ export default function GroupSessionPage() {
 				if (!res.ok) return;
 				const data = await res.json();
 				const latest = data?.session;
-				if (!cancelled && latest?.restaurants?.length) {
-					let updated = null;
-					setSession((prev) => {
-						const next = {
-							...prev,
-							...latest,
-							restaurants: latest.restaurants,
-						};
-						updated = next;
-						return next;
-					});
-					if (updated) {
-						sessionRef.current = updated;
-						saveSession(code, updated);
-						setWinner(null);
-					}
+				if (!cancelled && latest) {
+					const baseRestaurants = Array.isArray(latest.restaurants) && latest.restaurants.length
+						? latest.restaurants
+						: sessionRef.current?.restaurants || restaurantsCache || [];
+					const sanitized = normalizeSessionSnapshot({ ...latest, restaurants: baseRestaurants }, code, baseRestaurants);
+					if ((sanitized.restaurants?.length || 0) === 0) return;
+					sessionRef.current = sanitized;
+					setSession(sanitized);
+					saveSession(code, sanitized);
+					setWinner(null);
 				}
 			} catch (error) {
 				console.warn("group_state_fetch_fallback_error", error);
@@ -344,37 +647,73 @@ export default function GroupSessionPage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [code, session.restaurants.length]);
+	}, [code, restaurantsCache, session.restaurants.length]);
 
 	const handleVote = useCallback(
-		(name, delta) => {
+		(restaurant, delta) => {
+			if (!restaurant) return;
+			const restaurantKey = getRestaurantKey(restaurant);
+			if (!restaurantKey) return;
 			let updated = null;
-			let nextScoreValue = 0;
+			let payload = null;
 			setSession((prev) => {
+				const restaurants = prev.restaurants || [];
+				const target = restaurants.find((item) => getRestaurantKey(item) === restaurantKey);
+				if (!target) return prev;
+				const baseLedger = prev.ledger && typeof prev.ledger === "object" ? prev.ledger : {};
+				const entry = baseLedger[restaurantKey]
+					? {
+						total: baseLedger[restaurantKey].total || 0,
+						contributors: { ...(baseLedger[restaurantKey].contributors || {}) },
+					}
+					: { total: 0, contributors: {} };
+				const newVersion = (prev.version || 0) + 1;
+				const previousScore = entry.contributors[participantId]?.score || 0;
+				const nextScore = previousScore + delta;
+				const contributors = { ...entry.contributors };
+				if (nextScore === 0) {
+					delete contributors[participantId];
+				} else {
+					contributors[participantId] = { score: nextScore, version: newVersion };
+				}
+				const totalScore = Object.values(contributors).reduce((sum, detail) => sum + (detail?.score || 0), 0);
+				const ledger = { ...baseLedger };
+				if (totalScore === 0) {
+					delete ledger[restaurantKey];
+				} else {
+					ledger[restaurantKey] = { total: totalScore, contributors };
+				}
 				const votes = { ...(prev.votes || {}) };
-				nextScoreValue = (votes[name] || 0) + delta;
-				votes[name] = nextScoreValue;
+				if (totalScore === 0) {
+					delete votes[restaurantKey];
+				} else {
+					votes[restaurantKey] = totalScore;
+				}
 				const next = {
 					...prev,
 					votes,
-					version: (prev.version || 0) + 1,
+					ledger,
+					version: newVersion,
 					lastUpdatedAt: Date.now(),
 					ownerParticipantId: prev.ownerParticipantId || participantId,
 					ownerDisplayName: prev.ownerDisplayName || displayName,
 				};
 				updated = next;
+				payload = {
+					restaurantKey,
+					restaurantName: target.name,
+					participantScore: nextScore,
+					totalScore,
+					version: newVersion,
+				};
 				return next;
 			});
-			if (updated) {
+			if (updated && payload) {
 				sessionRef.current = updated;
 				saveSession(code, updated);
 				setWinner(null);
 				schedulePersist(updated);
-				broadcast("vote", {
-					name,
-					votes: { [name]: nextScoreValue },
-					version: updated.version,
-				});
+				broadcast("vote", payload);
 			}
 		},
 		[broadcast, code, displayName, participantId, schedulePersist]
@@ -390,18 +729,21 @@ export default function GroupSessionPage() {
 			return;
 		}
 		let best = null;
-		for (const [name, score] of entries) {
-			const rest = session.restaurants.find((restaurant) => restaurant.name === name);
+		for (const [key, score] of entries) {
+			const rest =
+				session.restaurants.find((restaurant) => getRestaurantKey(restaurant) === key) ||
+				session.restaurants.find((restaurant) => restaurant.name === key);
 			const rating = rest?.rating ?? 0;
 			if (!best) {
-				best = { name, score, rating, item: rest };
+				best = { key, score, rating, item: rest };
 			} else {
 				const cmp = score - best.score || rating - best.rating || 0;
-				if (cmp > 0) best = { name, score, rating, item: rest };
+				if (cmp > 0) best = { key, score, rating, item: rest };
 			}
 		}
 		const selection = best?.item || null;
 		setWinner(selection);
+		setTimerExpired(false);
 		if (selection) {
 			broadcast("finalize", { winner: selection });
 		}
@@ -416,10 +758,18 @@ export default function GroupSessionPage() {
 	}, []);
 
 	useEffect(() => {
-		if (timeLeft === 0 && !winner) {
-			handleFinalize();
+		if (timeLeft === 0) {
+			if (!autoFinalizeRef.current) {
+				autoFinalizeRef.current = true;
+				setTimerExpired(true);
+				const current = sessionRef.current;
+				const currentRound = current?.roundId ?? 0;
+				broadcast("timer_expired", { roundId: currentRound });
+			}
+		} else if (timeLeft > 0 && autoFinalizeRef.current) {
+			autoFinalizeRef.current = false;
 		}
-	}, [handleFinalize, timeLeft, winner]);
+	}, [broadcast, timeLeft]);
 
 	useEffect(() => {
 		if (!supabase || !code) return;
@@ -461,15 +811,53 @@ export default function GroupSessionPage() {
 				if (!payload || payload.participantId === participantId) return;
 				let updated = null;
 				setSession((prev) => {
+					const restaurantKey = payload.restaurantKey;
+					const voterId = payload.participantId;
 					const incomingVersion = payload.version || 0;
-					if ((prev.version || 0) >= incomingVersion) return prev;
+					if (!restaurantKey || !voterId) return prev;
+					const baseLedger = prev.ledger && typeof prev.ledger === "object" ? prev.ledger : {};
+					const existingEntry = baseLedger[restaurantKey]
+						? {
+							total: baseLedger[restaurantKey].total || 0,
+							contributors: { ...(baseLedger[restaurantKey].contributors || {}) },
+						}
+						: { total: 0, contributors: {} };
+					const previousVersion = existingEntry.contributors[voterId]?.version || 0;
+					if (incomingVersion && previousVersion && incomingVersion < previousVersion) {
+						return prev;
+					}
+					const participantScore = typeof payload.participantScore === "number" ? payload.participantScore : 0;
+					const contributors = { ...existingEntry.contributors };
+					if (participantScore === 0) {
+						delete contributors[voterId];
+					} else {
+						contributors[voterId] = {
+							score: participantScore,
+							version: incomingVersion || previousVersion || Date.now(),
+						};
+					}
+					const totalScore = Object.values(contributors).reduce((sum, detail) => sum + (detail?.score || 0), 0);
+					const ledger = { ...baseLedger };
+					if (totalScore === 0) {
+						delete ledger[restaurantKey];
+					} else {
+						ledger[restaurantKey] = { total: totalScore, contributors };
+					}
+					const votes = { ...(prev.votes || {}) };
+					if (totalScore === 0) {
+						delete votes[restaurantKey];
+					} else {
+						votes[restaurantKey] = totalScore;
+					}
 					const next = {
 						...prev,
-						votes: applyVotes(prev, payload.votes || {}),
-						version: incomingVersion,
+						votes,
+						ledger,
+						version: Math.max(prev.version || 0, incomingVersion),
 						lastUpdatedAt: Date.now(),
 						ownerParticipantId: sessionRef.current?.ownerParticipantId || prev.ownerParticipantId || null,
 						ownerDisplayName: sessionRef.current?.ownerDisplayName || prev.ownerDisplayName || null,
+						roundId: sessionRef.current?.roundId ?? prev.roundId ?? 0,
 					};
 					updated = next;
 					return next;
@@ -490,22 +878,44 @@ export default function GroupSessionPage() {
 					});
 				} catch {}
 				if (!payload || payload.participantId === participantId) return;
-				const incoming = payload.session || {};
-				const incomingVersion = incoming.version || 0;
-				const currentVersion = sessionRef.current?.version || 0;
-				if (incomingVersion <= currentVersion) return;
-				const next = {
-					...sessionRef.current,
-					...incoming,
-					restaurants: incoming.restaurants?.length
-						? incoming.restaurants
-						: sessionRef.current.restaurants,
+				const incomingSnapshot = payload.session || {};
+				const currentSnapshot = sessionRef.current || createEmptySession(code, restaurantsCache);
+				const currentRestaurants = Array.isArray(currentSnapshot.restaurants) ? currentSnapshot.restaurants : [];
+				const incomingRestaurants = Array.isArray(incomingSnapshot.restaurants) ? incomingSnapshot.restaurants : [];
+				const currentRound = typeof currentSnapshot.roundId === "number" ? currentSnapshot.roundId : 0;
+				const incomingRound = typeof incomingSnapshot.roundId === "number" ? incomingSnapshot.roundId : 0;
+				const shouldResetLedger = incomingRound > currentRound && (!incomingSnapshot.ledger || Object.keys(incomingSnapshot.ledger || {}).length === 0);
+				const { list: mergedRestaurants } = mergeRestaurantLists(shouldResetLedger ? [] : currentRestaurants, incomingRestaurants);
+				const mergedLedger = mergeLedgerSnapshots(
+					shouldResetLedger ? {} : currentSnapshot.ledger,
+					incomingSnapshot.ledger,
+					{ reset: shouldResetLedger }
+				);
+				const baseVotes = shouldResetLedger ? {} : currentSnapshot.votes || {};
+				const mergedSnapshot = {
+					...currentSnapshot,
+					...incomingSnapshot,
+					restaurants: mergedRestaurants,
+					ledger: mergedLedger,
+					votes: { ...baseVotes, ...(incomingSnapshot.votes || {}) },
+					version: Math.max(Number(incomingSnapshot.version) || 0, Number(currentSnapshot.version) || 0),
+					lastUpdatedAt: Math.max(Number(incomingSnapshot.lastUpdatedAt) || 0, Number(currentSnapshot.lastUpdatedAt) || 0),
+					roundId: Math.max(incomingRound, currentRound),
+					ownerParticipantId:
+						incomingRound >= currentRound
+							? incomingSnapshot.ownerParticipantId || currentSnapshot.ownerParticipantId || null
+							: currentSnapshot.ownerParticipantId || null,
+					ownerDisplayName:
+						incomingRound >= currentRound
+							? incomingSnapshot.ownerDisplayName || currentSnapshot.ownerDisplayName || null
+							: currentSnapshot.ownerDisplayName || null,
 				};
-				sessionRef.current = next;
-				setSession(next);
-				saveSession(code, next);
+				const sanitized = normalizeSessionSnapshot(mergedSnapshot, code, mergedRestaurants);
+				sessionRef.current = sanitized;
+				setSession(sanitized);
+				saveSession(code, sanitized);
 				setWinner(null);
-				schedulePersist(next);
+				schedulePersist(sanitized);
 			})
 			.on("broadcast", { event: "request_state" }, ({ payload }) => {
 				try {
@@ -530,6 +940,22 @@ export default function GroupSessionPage() {
 				} catch {}
 				if (!payload || payload.participantId === participantId) return;
 				setWinner(payload.winner || null);
+				setTimerExpired(false);
+			})
+			.on("broadcast", { event: "timer_expired" }, ({ payload }) => {
+				try {
+					console.info("group_broadcast_timer_expired", {
+						from: payload?.participantId,
+						self: participantId,
+						roundId: payload?.roundId,
+					});
+				} catch {}
+				if (!payload || payload.participantId === participantId) return;
+				const currentRound = sessionRef.current?.roundId ?? 0;
+				if (typeof payload.roundId === "number" && payload.roundId !== currentRound) return;
+				autoFinalizeRef.current = true;
+				setTimerExpired(true);
+				setTimeLeft(0);
 			})
 			.on("presence", { event: "sync" }, () => {
 				setParticipants(computePresenceList());
@@ -566,7 +992,7 @@ export default function GroupSessionPage() {
 			supabase.removeChannel(channel);
 			channelRef.current = null;
 		};
-	}, [broadcast, code, displayName, participantId, schedulePersist, supabase]);
+	}, [broadcast, code, displayName, participantId, restaurantsCache, schedulePersist, supabase]);
 
 	const handleCopy = useCallback(async () => {
 		try {
@@ -676,12 +1102,16 @@ export default function GroupSessionPage() {
 						) : (
 					<>
 						<div className="grid md:grid-cols-3 gap-4">
-							{currentSlice.map((restaurant) => {
-								const score = session.votes?.[restaurant.name] ?? 0;
+							{currentSlice.map((restaurant, index) => {
+								const restaurantKey = getRestaurantKey(restaurant);
+								const cardKey = restaurantKey || `${restaurant?.name || "restaurant"}-${page * 3 + index}`;
+								const score = restaurantKey
+									? session.votes?.[restaurantKey] ?? session.votes?.[restaurant.name] ?? 0
+									: session.votes?.[restaurant.name] ?? 0;
 								const positive = score > 0;
 								const negative = score < 0;
 								return (
-									<div key={restaurant.name} className="rounded-xl bg-white shadow p-4 flex flex-col">
+									<div key={cardKey} className="rounded-xl bg-white shadow p-4 flex flex-col">
 										<Image
 											src={restaurant.photo || "/placeholder.jpg"}
 											alt={restaurant.name}
@@ -701,13 +1131,13 @@ export default function GroupSessionPage() {
 										</div>
 										<div className="mt-auto flex items-center gap-2 pt-3">
 											<button
-												onClick={() => handleVote(restaurant.name, +1)}
+												onClick={() => handleVote(restaurant, +1)}
 												className={`flex-1 rounded-lg px-3 py-2 transition ${positive ? "bg-emerald-200 text-gray-900" : "bg-emerald-100 text-gray-800 hover:bg-emerald-200"}`}
 											>
 												Like
 											</button>
 											<button
-												onClick={() => handleVote(restaurant.name, -1)}
+												onClick={() => handleVote(restaurant, -1)}
 												className={`flex-1 rounded-lg px-3 py-2 transition ${negative ? "bg-rose-200 text-gray-900" : "bg-rose-100 text-gray-800 hover:bg-rose-200"}`}
 											>
 												Pass
@@ -721,10 +1151,15 @@ export default function GroupSessionPage() {
 						<div className="mt-5 flex items-start justify-between flex-col md:flex-row gap-4">
 							<div className="flex-1 text-sm text-gray-600">
 								<div>Voting updates sync in realtime for this group.</div>
+								{timerExpired && !winner ? (
+									<div className="mt-1 text-xs text-rose-600">
+										Timer expired. Review the scores and click Finalize when everyone is ready.
+									</div>
+								) : null}
 								{voteSnapshot.length > 0 ? (
 									<ul className="mt-2 space-y-1 text-xs text-gray-500">
 										{voteSnapshot.map((entry) => (
-											<li key={entry.name} className="flex items-center justify-between gap-2">
+											<li key={entry.key || entry.name} className="flex items-center justify-between gap-2">
 												<span className="truncate">{entry.name}</span>
 												<span className={entry.score > 0 ? "text-emerald-600" : entry.score < 0 ? "text-rose-600" : "text-gray-700"}>
 													Score {entry.score > 0 ? `+${entry.score}` : entry.score}

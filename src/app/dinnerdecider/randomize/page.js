@@ -24,14 +24,16 @@ export default function RandomizePage() {
     setR1Rerolls,
     user,
     setRestaurantsCache,
-    location,
+    activeLocation,
     mood,
     weather,
     preferences,
     setR2Seed,
     timeCategory,
+    planAhead,
   } = useDinner();
   const [combo, setCombo] = useState(null);
+  const drinkMode = mood === "drinks";
 
   const layerOptions = useMemo(() => {
     const build = (layerKey) => {
@@ -138,17 +140,19 @@ export default function RandomizePage() {
         experience: new Set(layerOptions.experience.ids),
         specialized: new Set(layerOptions.specialized.ids),
         distance: new Set(layerOptions.distance.ids),
-      }, saved, { mood, weather, prefs: preferences, timeCategory });
+      }, saved, { mood, weather, prefs: preferences, timeCategory, drinkMode });
       const rec = smart.combo;
       setSelectedCombo(rec);
-      const lat = location?.lat ?? 30.3322;
-      const lng = location?.lng ?? -81.6557;
+      const lat = activeLocation?.lat ?? 30.3322;
+      const lng = activeLocation?.lng ?? -81.6557;
       const data = await fetchNearbyRestaurants(lat, lng, filters, rec, {
         mood,
         weather,
         prefs: preferences,
         timeCategory,
         weatherHint: weather?.weatherHint,
+        planAheadEnabled: Boolean(planAhead?.enabled && planAhead?.location),
+        drinkMode,
       });
       setRestaurantsCache(Array.isArray(data) ? data : []);
       router.replace("/dinnerdecider/output");

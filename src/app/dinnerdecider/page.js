@@ -12,6 +12,15 @@ import { motion, AnimatePresence } from "framer-motion";
 
 const LAYERS = ["region", "experience", "specialized", "distance"];
 
+function formatUtcOffset(minutes) {
+  if (!Number.isFinite(minutes)) return null;
+  const abs = Math.abs(minutes);
+  const sign = minutes >= 0 ? "+" : "-";
+  const hours = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mins = String(abs % 60).padStart(2, "0");
+  return `UTC${sign}${hours}:${mins}`;
+}
+
 function toPending(filters) {
   const next = {};
   LAYERS.forEach((layer) => {
@@ -55,6 +64,10 @@ export default function Dashboard() {
     preferences,
     refreshPreferences,
     timeCategory,
+    planAhead,
+    clearPlanAhead,
+    specialModeEnabled,
+    setSpecialModeEnabled,
   } = useDinner();
   const [locStatus, setLocStatus] = useState("detect"); // detect | ok | fail
   const [pending, setPending] = useState(() => toPending(filters));
@@ -69,6 +82,24 @@ export default function Dashboard() {
     const condition = weather.condition ? weather.condition : null;
     return [temp, condition].filter(Boolean).join(" • ");
   }, [weather]);
+  const planAheadActive = Boolean(planAhead?.enabled && planAhead?.location);
+  const planAheadSummary = useMemo(() => {
+    if (!planAheadActive) return null;
+    const locationLabel = planAhead?.label || "Selected location";
+    const hour24 = Number.isFinite(planAhead?.hour24) ? ((Math.floor(planAhead.hour24) % 24) + 24) % 24 : null;
+    const meridiem = planAhead?.meridiem === "AM" || planAhead?.meridiem === "PM"
+      ? planAhead.meridiem
+      : hour24 !== null && hour24 >= 12 ? "PM" : "AM";
+    const hour12 = hour24 === null ? null : (hour24 % 12 === 0 ? 12 : hour24 % 12);
+    const timeLabel = hour12 ? `${hour12} ${meridiem}` : null;
+    const tz = planAhead?.timeZoneId || formatUtcOffset(planAhead?.utcOffsetMinutes);
+    const parts = [locationLabel];
+    if (planAhead?.timeCategory) parts.push(planAhead.timeCategory);
+    if (planAhead?.date) parts.push(planAhead.date);
+    if (timeLabel) parts.push(timeLabel);
+    if (tz) parts.push(tz);
+    return `🗺️ ${parts.join(" • ")}`;
+  }, [planAheadActive, planAhead]);
 
   useEffect(() => {
     setPending(toPending(filters));
@@ -170,6 +201,24 @@ export default function Dashboard() {
           ) : null}
         </header>
 
+        {planAheadSummary ? (
+          <div className="mb-6 rounded-2xl border border-emerald-400/40 bg-emerald-900/30 px-4 py-3 text-sm text-emerald-100/90">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>{planAheadSummary}</span>
+              <div className="flex items-center gap-2 text-xs text-emerald-200/80">
+                <span>Plan Ahead active</span>
+                <button
+                  type="button"
+                  onClick={clearPlanAhead}
+                  className="rounded-full border border-emerald-400/60 px-3 py-1 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/10"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <div className="rounded-3xl bg-white/10 backdrop-blur-md shadow-xl p-5 md:p-8">
           <div className="mb-5">
             <h2 className="text-white text-lg font-semibold">Choose what you’re craving</h2>
@@ -182,6 +231,25 @@ export default function Dashboard() {
             initial={pending}
             onChange={(next) => setPending(next)}
           />
+
+          <div className="mt-6 flex flex-col gap-2 rounded-2xl border border-white/20 bg-white/5 px-4 py-3 text-sm text-white/80 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <span className="font-semibold text-white">Special Dinner mode</span>
+              <span className="ml-2 text-white/70">Adds upscale keywords like “steakhouse” and “chef table” to widen searches.</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSpecialModeEnabled(!specialModeEnabled)}
+              className={`relative inline-flex h-8 w-16 items-center rounded-full border border-white/30 transition ${specialModeEnabled ? "bg-rose-500/80" : "bg-white/20"}`}
+            >
+              <span
+                className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition ${specialModeEnabled ? "translate-x-8" : "translate-x-1"}`}
+              />
+              <span className="absolute inset-0 flex items-center justify-center text-xs font-semibold uppercase tracking-wide text-white/80">
+                {specialModeEnabled ? "On" : "Off"}
+              </span>
+            </button>
+          </div>
 
           <div className="mt-8 flex justify-center">
             <button

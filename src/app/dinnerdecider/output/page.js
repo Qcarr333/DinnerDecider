@@ -19,13 +19,14 @@ export default function OutputScreen() {
     setR2Rerolls,
   setR1Rerolls,
     user,
-    location,
+    activeLocation,
     filters,
     saveRestaurant,
     mood,
     weather,
     preferences,
     timeCategory,
+    planAhead,
   } = useDinner();
   const [rotationCursor, setRotationCursor] = useState(0);
   const sessionSeenRef = useRef(new Set());
@@ -34,6 +35,33 @@ export default function OutputScreen() {
   const metaSnapshotRef = useRef(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const router = useRouter();
+  const planAheadActive = useMemo(() => Boolean(planAhead?.enabled && planAhead?.location), [planAhead]);
+  const drinkMode = mood === "drinks";
+  const planAheadDescriptor = useMemo(() => {
+    if (!planAheadActive) return null;
+    const locationLabel = planAhead?.label || "Selected location";
+    const hour24 = Number.isFinite(planAhead?.hour24) ? ((Math.floor(planAhead.hour24) % 24) + 24) % 24 : null;
+    const meridiem = planAhead?.meridiem === "AM" || planAhead?.meridiem === "PM"
+      ? planAhead.meridiem
+      : hour24 !== null && hour24 >= 12 ? "PM" : "AM";
+    const hour12 = hour24 === null ? null : (hour24 % 12 === 0 ? 12 : hour24 % 12);
+    const timeText = hour12 ? `${hour12} ${meridiem}` : null;
+    const offsetMs = Number.isFinite(planAhead?.utcOffsetMinutes) ? planAhead.utcOffsetMinutes * 60000 : 0;
+    let dayName = null;
+    if (planAhead?.date) {
+      const base = new Date(`${planAhead.date}T12:00:00Z`);
+      if (!Number.isNaN(base.getTime())) {
+        const adjusted = new Date(base.getTime() + offsetMs);
+        dayName = new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(adjusted);
+      }
+    }
+    const parts = [`Planning for ${locationLabel}`];
+    if (planAhead?.timeCategory) parts.push(planAhead.timeCategory);
+    if (timeText) parts.push(`at ${timeText}`);
+    if (planAhead?.date) parts.push(`on ${planAhead.date}${dayName ? ` (${dayName})` : ""}`);
+    if (planAhead?.timeZoneId) parts.push(planAhead.timeZoneId);
+    return `🗺️ ${parts.join(" • ")}`;
+  }, [planAheadActive, planAhead]);
 
   const labelMap = useMemo(() => {
     const map = new Map();
@@ -92,15 +120,17 @@ export default function OutputScreen() {
   // If we have a confirmed combo, refetch with combo-influenced keyword/radius
   useEffect(() => {
     (async () => {
-      if (!selectedCombo || !location?.lat || !location?.lng) return;
+      if (!selectedCombo || !activeLocation?.lat || !activeLocation?.lng) return;
       try {
         console.log("🎯 R2 Query Based On:", selectedCombo);
-        const data = await fetchNearbyRestaurants(location.lat, location.lng, filters, selectedCombo, {
+        const data = await fetchNearbyRestaurants(activeLocation.lat, activeLocation.lng, filters, selectedCombo, {
           mood,
           weather,
           prefs: preferences,
           timeCategory,
           weatherHint: weather?.weatherHint,
+          planAheadEnabled: Boolean(planAhead?.enabled && planAhead?.location),
+          drinkMode,
         });
         setRestaurantsCache(Array.isArray(data) ? data : []);
       } catch (e) {
@@ -108,7 +138,7 @@ export default function OutputScreen() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCombo, location?.lat, location?.lng, mood, weather, preferences, timeCategory]);
+  }, [selectedCombo, activeLocation?.lat, activeLocation?.lng, mood, weather, preferences, timeCategory, planAhead, drinkMode]);
 
   // Accept auto-pick cache handoff if present
   useEffect(() => {
@@ -161,6 +191,7 @@ export default function OutputScreen() {
   ) : null;
 
   const contextHeadline = useMemo(() => {
+    if (planAheadDescriptor) return planAheadDescriptor;
     if (!timeCategory) return null;
     const emojiMap = {
       "Early Riser": "🐓",
@@ -187,7 +218,7 @@ export default function OutputScreen() {
     const tail = parts.filter(Boolean).join(" ");
     const emoji = emojiMap[timeCategory] || "🕒";
     return `${emoji} ${timeCategory} picks${tail ? ` for a ${tail}` : ""}`;
-  }, [timeCategory, weather]);
+  }, [planAheadDescriptor, timeCategory, weather]);
 
   const finalList = useMemo(() => {
     const base = (Array.isArray(restaurantsCache) ? restaurantsCache : []).filter((r) => {
@@ -274,8 +305,8 @@ export default function OutputScreen() {
 
   const refetchRotation = useCallback(async (reason) => {
     if (!selectedCombo) return false;
-    const lat = location?.lat ?? 30.3322;
-    const lng = location?.lng ?? -81.6557;
+  const lat = activeLocation?.lat ?? 30.3322;
+  const lng = activeLocation?.lng ?? -81.6557;
     if (!lat || !lng) return false;
     const now = Date.now();
     if (now - refreshRef.current < 5000) return false;
@@ -289,6 +320,8 @@ export default function OutputScreen() {
         prefs: preferences,
         timeCategory,
         weatherHint: weather?.weatherHint,
+        planAheadEnabled: Boolean(planAhead?.enabled && planAhead?.location),
+        drinkMode,
       });
       if (Array.isArray(data)) {
         setRestaurantsCache(data);
@@ -301,7 +334,7 @@ export default function OutputScreen() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [filters, location, mood, preferences, selectedCombo, setRestaurantsCache, timeCategory, weather]);
+  }, [filters, activeLocation, mood, preferences, selectedCombo, setRestaurantsCache, timeCategory, weather, planAhead, drinkMode]);
 
   const handleReroll = useCallback(async () => {
     if (!user?.premium && r2Rerolls >= 6) return;

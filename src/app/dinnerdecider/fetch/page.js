@@ -10,23 +10,38 @@ const SANDWICH_STATES = ["🥪", "🥪", "🥪", "🥪", "🍞", "🍞", ""];
 
 export default function FetchScreen() {
   const router = useRouter();
-  const { filters, setRestaurantsCache, location, mood, weather, preferences, timeCategory } = useDinner();
+  const {
+    filters,
+    setRestaurantsCache,
+    activeLocation,
+    mood,
+    weather,
+    preferences,
+    timeCategory,
+    planAhead,
+    specialModeEnabled,
+  } = useDinner();
   const [done, setDone] = useState(false);
   const [idx, setIdx] = useState(0);
+  const planAheadActive = Boolean(planAhead?.enabled && planAhead?.location);
+  const drinkMode = mood === "drinks";
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const lat = location?.lat ?? 30.3322;
-      const lng = location?.lng ?? -81.6557;
+      const lat = activeLocation?.lat ?? 30.3322;
+      const lng = activeLocation?.lng ?? -81.6557;
       try {
-      const results = await fetchNearbyRestaurants(lat, lng, filters, null, {
-        mood,
-        weather,
-        prefs: preferences,
-        timeCategory,
-        weatherHint: weather?.weatherHint,
-      });
+        const results = await fetchNearbyRestaurants(lat, lng, filters, null, {
+          mood,
+          weather,
+          prefs: preferences,
+          timeCategory,
+          weatherHint: weather?.weatherHint,
+          planAheadEnabled: planAheadActive,
+          drinkMode,
+          specialModeEnabled,
+        });
         if (cancelled) return;
         setRestaurantsCache(results || []);
         setDone(true);
@@ -43,7 +58,7 @@ export default function FetchScreen() {
     return () => {
       cancelled = true;
     };
-  }, [filters, router, setRestaurantsCache, location, mood, weather, preferences, timeCategory]);
+  }, [filters, router, setRestaurantsCache, activeLocation, mood, weather, preferences, timeCategory, planAheadActive, drinkMode, specialModeEnabled]);
 
   useEffect(() => {
     const timer = setInterval(() => setIdx((p) => (p + 1) % SANDWICH_STATES.length), 500);

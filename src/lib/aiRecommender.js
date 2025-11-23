@@ -82,6 +82,7 @@ export async function suggestSmart(filters, savedRestaurants, opts = {}) {
     ["healthy", [["salad", 1.3], ["vegetarian", 1.2], ["poke", 1.2], ["mediterranean", 1.1]]],
     ["fast", [["street_food", 1.2], ["tacos", 1.1], ["burgers", 1.05]]],
     ["celebration", [["steakhouse", 1.3], ["seafood", 1.25], ["wine_bar", 1.1]]],
+    ["drinks", [["wine_bar", 1.6], ["cocktail", 1.5], ["speakeasy", 1.4], ["brewery", 1.3]]],
   ]);
 
   const weatherSpecializedBoosts = new Map([

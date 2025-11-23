@@ -9,6 +9,7 @@ const MOODS = [
   { id: "healthy", label: "Healthy", icon: "Leaf", hint: "Light & fresh" },
   { id: "fast", label: "Fast", icon: "Timer", hint: "Quick bites" },
   { id: "celebration", label: "Celebration", icon: "PartyPopper", hint: "Night-out energy" },
+  { id: "drinks", label: "Drinks", icon: "Wine", hint: "Bars & lounges" },
 ];
 
 export default function MoodSelector({ value = "any", onChange }) {

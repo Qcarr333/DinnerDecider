@@ -19,8 +19,115 @@ const RADIUS_LOOKUP = {
   budget: 8000,
 };
 
+const FOOD_TYPE_SET = new Set([
+  "food",
+  "restaurant",
+  "cafe",
+  "bakery",
+  "meal_takeaway",
+  "meal_delivery",
+  "diner",
+  "brasserie",
+  "sandwich_shop",
+  "fast_food_restaurant",
+  "pastry_shop",
+  "pizza",
+  "ice_cream_shop",
+  "dessert_shop",
+  "salad_shop",
+  "soup_shop",
+  "juice_shop",
+  "tea_house",
+  "bar_and_grill",
+]);
+
+const FOOD_NAME_HINTS = [
+  /cafe/i,
+  /bakery/i,
+  /brunch/i,
+  /breakfast/i,
+  /deli/i,
+  /dessert/i,
+  /ice\s?cream/i,
+  /gelato/i,
+  /pizza/i,
+  /noodle/i,
+  /ramen/i,
+  /sushi/i,
+  /poke/i,
+  /taco/i,
+  /bbq/i,
+  /barbecue/i,
+  /fast\s?food/i,
+  /steak/i,
+  /seafood/i,
+  /vegan/i,
+  /vegetarian/i,
+  /bistro/i,
+  /grill/i,
+  /bar\s?&\s?grill/i,
+  /southern/i,
+  /soul\s?food/i,
+  /juice/i,
+  /smoothie/i,
+  /tea\s?house/i,
+  /espresso/i,
+  /crepe/i,
+  /pastry/i,
+  /tapas/i,
+  /mediterranean/i,
+  /indian/i,
+  /thai/i,
+  /korean/i,
+  /ethiopian/i,
+];
+
+const DRINK_TYPE_SET = new Set([
+  "bar",
+  "beer_garden",
+  "cocktail_bar",
+  "wine_bar",
+  "pub",
+  "sports_bar",
+  "night_club",
+  "tapas_bar",
+  "brewery",
+  "winery",
+  "jazz_club",
+  "karaoke_bar",
+  "lounge",
+]);
+
+const DRINK_NAME_HINTS = [
+  /\bbar\b/i,
+  /cocktail/i,
+  /speakeasy/i,
+  /taproom/i,
+  /brew(er|ing)/i,
+  /pub/i,
+  /wine\b/i,
+  /whiskey/i,
+  /tequila/i,
+  /mezcal/i,
+  /lounge/i,
+  /night\s?club/i,
+  /craft\s?beer/i,
+];
+
+const FALLBACK_FOOD_ANCHORS = ["steakhouse", "seafood", "chef table", "farm to table"];
+const FALLBACK_DRINK_ANCHORS = ["cocktail bar", "wine bar", "speakeasy", "taproom"];
+const DRINK_KEYWORD_HINTS = ["cocktail", "wine bar", "speakeasy", "taproom", "brewery", "whiskey bar"];
+const FOOD_KEYWORD_HINTS = ["cafe", "bakery", "dessert", "pizza", "noodle", "tapas"];
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveBooleanFlag(value) {
+  if (value === true) return true;
+  if (value === "true" || value === "1") return true;
+  if (value === 1) return true;
+  return false;
 }
 
 function toSerializableFilters(filters) {
@@ -125,10 +232,24 @@ function resolveRadius(activeFilters, selectedCombo) {
 }
 
 function assembleKeyword(activeFilters, selectedCombo, signals) {
-  const { mood = "any", weather = null, prefs = {}, weatherHint = null, timeCategory = null } = signals || {};
+  const {
+    mood = "any",
+    weather = null,
+    prefs = {},
+    weatherHint = null,
+    timeCategory = null,
+    drinkMode = false,
+    specialModeEnabled = false,
+  } = signals || {};
 
+  const specialModeActive = resolveBooleanFlag(specialModeEnabled);
+  const isDrinkMode = drinkMode || mood === "drinks";
   const keywordTokens = [];
-  const fallbackExperienceAnchors = ["steakhouse", "seafood", "cocktail bar", "chef table"];
+  const fallbackExperienceAnchors = isDrinkMode
+    ? FALLBACK_DRINK_ANCHORS
+    : specialModeActive
+      ? FALLBACK_FOOD_ANCHORS
+      : [];
   const dislikes = new Set((Array.isArray(prefs?.dislikes) ? prefs.dislikes : []).map((item) => String(item).toLowerCase()));
 
   const addToken = (token) => {
@@ -152,7 +273,7 @@ function assembleKeyword(activeFilters, selectedCombo, signals) {
 
   if (experienceLabels.length) {
     experienceLabels.forEach(addToken);
-  } else {
+  } else if (fallbackExperienceAnchors.length) {
     fallbackExperienceAnchors.forEach(addToken);
   }
 
@@ -175,6 +296,12 @@ function assembleKeyword(activeFilters, selectedCombo, signals) {
     if (!hasMoodInExperience) addToken(mood);
   }
 
+  if (isDrinkMode) {
+    DRINK_KEYWORD_HINTS.forEach(addToken);
+  } else if (keywordTokens.length < 4) {
+    FOOD_KEYWORD_HINTS.forEach(addToken);
+  }
+
   const dedupedTokens = dedupeKeywordParts(keywordTokens);
   const keyword = dedupedTokens.join(" ");
   const queryComplexityScore = keyword.trim() ? keyword.trim().split(/\s+/).length : 0;
@@ -186,29 +313,60 @@ function assembleKeyword(activeFilters, selectedCombo, signals) {
   if (weather?.bucket) hints.weatherBucket = weather.bucket;
   if (timeCategory) hints.timeCategory = timeCategory;
 
-  return { keyword, mood, weather, prefs, weatherHint, timeCategory, hints, queryComplexityScore };
+  return {
+    keyword,
+    mood,
+    weather,
+    prefs,
+    weatherHint,
+    timeCategory,
+    hints,
+    queryComplexityScore,
+    drinkMode: isDrinkMode,
+    specialModeEnabled: specialModeActive,
+  };
 }
 
-function buildPlacesUrl({ lat, lng, radius, keyword, apiKey }) {
+function buildPlacesUrl({ lat, lng, radius, keyword, apiKey, placeType = "food", openNow = true }) {
   const base = "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
   const params = new URLSearchParams({
     location: `${lat},${lng}`,
     radius: String(radius),
-    type: "restaurant",
-    opennow: "true",
     key: apiKey,
   });
+  if (placeType) params.set("type", placeType);
+  if (openNow) params.set("opennow", "true");
   if (keyword) params.set("keyword", keyword);
   return `${base}?${params.toString()}`;
 }
 
-function transformPlacesResults(raw, apiKey) {
+function transformPlacesResults(raw, apiKey, { drinkMode = false, skipOpenNow = false } = {}) {
   const filtered = raw.filter((place) => {
     const operational = place.business_status === "OPERATIONAL";
+    if (!operational) return false;
     const ratingOk = (place.rating ?? 0) >= 4.0;
+    if (!ratingOk) return false;
     const openNow = !!place?.opening_hours?.open_now;
-    const notBarOrTruck = !(/(?:truck|food\s?truck|club|bar)/i.test(place.name || "")) && !((place.types || []).some((t) => /bar|night_club/i.test(t)));
-    return operational && ratingOk && openNow && notBarOrTruck;
+    if (!skipOpenNow && !openNow) return false;
+
+    const types = Array.isArray(place.types) ? place.types : [];
+    const lowerName = (place.name || "").toLowerCase();
+    const descriptor = `${lowerName} ${(place.vicinity || place.formatted_address || "").toLowerCase()}`;
+    const isTruck = /food\s?truck/i.test(descriptor);
+    if (!drinkMode && isTruck) return false;
+
+    const hasDrinkType = types.some((type) => DRINK_TYPE_SET.has(type));
+    const hasDrinkHint = DRINK_NAME_HINTS.some((regex) => regex.test(descriptor));
+    if (drinkMode) {
+      return hasDrinkType || hasDrinkHint;
+    }
+
+    const hasFoodType = types.some((type) => FOOD_TYPE_SET.has(type));
+    const hasFoodHint = FOOD_NAME_HINTS.some((regex) => regex.test(descriptor));
+
+    if (!hasFoodType && !hasFoodHint) return false;
+    if (hasDrinkType && !hasFoodType && !hasFoodHint) return false;
+    return true;
   });
 
   const unique = new Map();
@@ -236,14 +394,11 @@ function transformPlacesResults(raw, apiKey) {
     };
   });
 
-  const excluded = raw.filter(
-    (place) =>
-      place.business_status !== "OPERATIONAL" ||
-      (place.rating ?? 0) < 4.0 ||
-      !place?.opening_hours?.open_now ||
-      /(?:truck|food\s?truck|club|bar)/i.test(place.name || "") ||
-      (place.types || []).some((t) => /bar|night_club/i.test(t))
-  );
+  const allowedKeys = new Set(Array.from(unique.keys()));
+  const excluded = raw.filter((place) => {
+    const key = place.place_id || `${place.name}|${place.vicinity || place.formatted_address || ""}`;
+    return !allowedKeys.has(key);
+  });
 
   return { results, excluded };
 }
@@ -257,7 +412,20 @@ function attachMeta(results, meta) {
   });
 }
 
-function buildOracleFallback({ keyword, radius, radiusSource, activeFilters, rawCount = 0, reason = "unknown", hints = null, queryComplexityScore = 0 }) {
+function buildOracleFallback({
+  keyword,
+  radius,
+  radiusSource,
+  activeFilters,
+  rawCount = 0,
+  reason = "unknown",
+  hints = null,
+  queryComplexityScore = 0,
+  drinkMode = false,
+  planAheadEnabled = false,
+  specialModeEnabled = false,
+}) {
+  const specialModeActive = resolveBooleanFlag(specialModeEnabled);
   const fallbackResults = [
     {
       name: "The Food Oracles are stumped 😱!",
@@ -296,6 +464,10 @@ function buildOracleFallback({ keyword, radius, radiusSource, activeFilters, raw
     queryComplexityScore,
   };
 
+  if (drinkMode) meta.drinkMode = true;
+  if (planAheadEnabled) meta.planAheadEnabled = true;
+  if (specialModeActive) meta.specialModeEnabled = true;
+
   if (hints && Object.keys(hints).length) {
     meta.hints = hints;
   }
@@ -306,7 +478,20 @@ function buildOracleFallback({ keyword, radius, radiusSource, activeFilters, raw
 export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, selectedCombo = null, signals = {}) {
   const { activeFilters, filterLogObject } = buildActiveFilters(filters, selectedCombo);
   const { radius, radiusSource } = resolveRadius(activeFilters, selectedCombo);
-  const { keyword, mood, weather, prefs, weatherHint, timeCategory, hints, queryComplexityScore } = assembleKeyword(activeFilters, selectedCombo, signals);
+  const {
+    keyword,
+    mood,
+    weather,
+    prefs,
+    weatherHint,
+    timeCategory,
+    hints,
+    queryComplexityScore,
+    drinkMode,
+    specialModeEnabled,
+  } = assembleKeyword(activeFilters, selectedCombo, signals);
+  const planAheadEnabled = signals?.planAheadEnabled === true;
+  const placeType = drinkMode ? "bar" : "food";
 
   try {
     console.log("[fetchNearbyRestaurants] coords:", { lat, lng }, "filters:", toSerializableFilters(filters), "selectedCombo:", selectedCombo, "signals:", signals);
@@ -314,6 +499,7 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
     console.log("🔑 Applied Keywords →", keyword || "(none)");
     console.log("📏 Radius →", { radius, radiusSource });
     console.log("🧮 Query Complexity →", queryComplexityScore);
+    console.log("✨ Special Dinner Mode →", specialModeEnabled ? "enabled" : "disabled");
   } catch {}
 
   if (queryComplexityScore > 10) {
@@ -344,7 +530,7 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
 
   if (hasKey) {
     try {
-      const url = buildPlacesUrl({ lat, lng, radius, keyword, apiKey: API_KEY });
+  const url = buildPlacesUrl({ lat, lng, radius, keyword, apiKey: API_KEY, placeType, openNow: !planAheadEnabled });
 
       try {
         console.log("🎯 Using R1 combo for query:", selectedCombo);
@@ -360,6 +546,9 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
         weather: weather?.bucket,
         weatherHint: weatherHint || weather?.weatherHint,
         timeCategory,
+        drinkMode,
+        planAheadEnabled,
+        specialModeEnabled,
       });
 
       const res = await fetch(url);
@@ -376,9 +565,9 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
         throw new Error(`HTTP ${res.status}`);
       }
 
-      const raw = Array.isArray(data?.results) ? data.results : [];
-      const { results, excluded } = transformPlacesResults(raw, API_KEY);
-      const placeIds = results.map((p) => p.place_id || `${p.name}|${p.address || ""}`);
+    const raw = Array.isArray(data?.results) ? data.results : [];
+    const { results, excluded } = transformPlacesResults(raw, API_KEY, { drinkMode, skipOpenNow: planAheadEnabled });
+    const placeIds = results.map((p) => p.place_id || `${p.name}|${p.address || ""}`);
 
       try {
         console.log(`✅ Filtered ${results.length}/${raw.length} restaurants`, results.map((r) => `${r.name} (${r.rating})`));
@@ -406,6 +595,9 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
         dedupedCount: results.length,
         originalCount: raw.length,
         queryComplexityScore,
+        drinkMode,
+        planAheadEnabled,
+        specialModeEnabled,
       };
 
       if (hints && Object.keys(hints).length) {
@@ -428,6 +620,9 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
         reason: "no_results",
         hints,
         queryComplexityScore,
+        drinkMode,
+        planAheadEnabled,
+        specialModeEnabled,
       });
     } catch (err) {
       try {
@@ -443,6 +638,9 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
         reason: "api_error",
         hints,
         queryComplexityScore,
+        drinkMode,
+        planAheadEnabled,
+        specialModeEnabled,
       });
     }
   }
@@ -458,6 +656,9 @@ export async function internalFetchNearbyRestaurants(lat, lng, filters = {}, sel
     reason: "missing_api_key",
     hints,
     queryComplexityScore,
+    drinkMode,
+    planAheadEnabled,
+    specialModeEnabled,
   });
 }
 
